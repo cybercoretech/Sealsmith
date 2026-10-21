@@ -227,6 +227,13 @@ fn audit_cargo(repo: &Path, cargo: &str, owner: &str, name: &str, r: &mut Report
         ));
         return;
     }
+    // Binaries released under their own tag namespace (e.g. cli-v*): the
+    // crate tag is still checked, and the release check looks at the newest
+    // release in that namespace instead of v{version}.
+    let namespace = workflow
+        .as_deref()
+        .and_then(checks::release_tag_prefix)
+        .filter(|p| !p.is_empty() && p != "v");
     let tag = format!("v{version}");
     if git(
         repo,
@@ -242,6 +249,49 @@ fn audit_cargo(repo: &Path, cargo: &str, owner: &str, name: &str, r: &mut Report
     }
     if expect == checks::Expect::Tag {
         r.note("library published to crates.io: a tag is enough, no release assets expected");
+        return;
+    }
+    if let Some(prefix) = namespace {
+        let latest = gh(&[
+            "release",
+            "list",
+            "-R",
+            &format!("{owner}/{name}"),
+            "--limit",
+            "100",
+            "--json",
+            "tagName",
+            "--jq",
+            ".[].tagName",
+        ])
+        .and_then(|out| {
+            out.lines()
+                .find(|t| t.starts_with(&prefix))
+                .map(str::to_string)
+        });
+        let Some(rel) = latest else {
+            r.bad(&format!(
+                "binaries are released under {prefix}* tags, but there's no {prefix}* GitHub release"
+            ));
+            return;
+        };
+        let n = gh(&[
+            "release",
+            "view",
+            &rel,
+            "-R",
+            &format!("{owner}/{name}"),
+            "--json",
+            "assets",
+            "--jq",
+            ".assets|length",
+        ]);
+        match n.as_deref().map(str::trim) {
+            Some(n) if n != "0" => r.ok(&format!(
+                "binaries are released under {prefix}* tags; newest {rel} has {n} assets"
+            )),
+            _ => r.bad(&format!("GitHub release {rel} has no assets")),
+        }
         return;
     }
     match gh(&[
