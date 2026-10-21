@@ -213,11 +213,17 @@ fn audit_cargo(repo: &Path, cargo: &str, owner: &str, name: &str, r: &mut Report
     let Some(version) = checks::cargo_package_version(cargo) else {
         return;
     };
-    let releasable =
-        repo.join(".github/workflows/release.yml").exists() || repo.join("install.sh").exists();
-    if !releasable {
+    let read = |f: &str| std::fs::read_to_string(repo.join(f)).ok();
+    let workflow = read(".github/workflows/release.yml");
+    let installers: Vec<String> = ["install.sh", "docs/install.sh", "site/install.sh"]
+        .iter()
+        .filter_map(|f| read(f))
+        .collect();
+    let installer_refs: Vec<&str> = installers.iter().map(String::as_str).collect();
+    let expect = checks::release_expectation(workflow.as_deref(), &installer_refs);
+    if expect == checks::Expect::Nothing {
         r.note(&format!(
-            "Cargo.toml {version} (no release workflow or installer; release checks skipped)"
+            "Cargo.toml {version} (built from source; no release promised)"
         ));
         return;
     }
@@ -233,6 +239,10 @@ fn audit_cargo(repo: &Path, cargo: &str, owner: &str, name: &str, r: &mut Report
         r.bad(&format!(
             "Cargo.toml says {version} but there's no local tag {tag}"
         ));
+    }
+    if expect == checks::Expect::Tag {
+        r.note("library published to crates.io: a tag is enough, no release assets expected");
+        return;
     }
     match gh(&[
         "release",
@@ -251,7 +261,7 @@ fn audit_cargo(repo: &Path, cargo: &str, owner: &str, name: &str, r: &mut Report
         )),
         Some(_) => r.bad(&format!("GitHub release {tag} has no assets")),
         None => r.bad(&format!(
-            "no GitHub release {tag} (install.sh has nothing to download)"
+            "no GitHub release {tag} (installers and release links have nothing to download)"
         )),
     }
 }

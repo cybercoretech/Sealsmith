@@ -61,6 +61,42 @@ pub fn pin_drift(found: &[(String, Vec<String>)]) -> BTreeMap<String, Vec<String
     by_pin
 }
 
+/// What a repository owes its users when its Cargo.toml version changes.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Expect {
+    /// Built from source: no tag or release is promised.
+    Nothing,
+    /// A library published to crates.io: the version should be tagged.
+    Tag,
+    /// Downloadable assets: a tag and a GitHub release with assets.
+    Release,
+}
+
+/// Decide from the release workflow and any installer what a version owes.
+/// Plugins whose installers run `cargo build` don't promise a release; an
+/// installer that downloads from `releases/` or a workflow that uploads
+/// assets does.
+pub fn release_expectation(release_yml: Option<&str>, installers: &[&str]) -> Expect {
+    let downloads = installers
+        .iter()
+        .any(|t| t.contains("/releases/") || t.contains("gh release download"));
+    let uploads = release_yml.is_some_and(|y| {
+        y.contains("action-gh-release")
+            || y.contains("gh release create")
+            || y.contains("upload-release-asset")
+            || y.contains("gh release upload")
+    });
+    if downloads || uploads {
+        Expect::Release
+    } else if release_yml
+        .is_some_and(|y| y.contains("cargo publish") || y.contains("CARGO_REGISTRY_TOKEN"))
+    {
+        Expect::Tag
+    } else {
+        Expect::Nothing
+    }
+}
+
 /// The signer line `apksigner verify --print-certs` prints for signer #1.
 pub fn apksigner_cert(output: &str) -> Option<String> {
     output
@@ -128,6 +164,23 @@ mod tests {
         ]);
         assert_eq!(d.len(), 2);
         assert_eq!(d["aa"], ["install.sh", "README.md"]);
+    }
+
+    #[test]
+    fn release_expectations() {
+        let gh_release =
+            "on:\n  push:\n    tags: [\"v*\"]\n...\n      - uses: softprops/action-gh-release@v2";
+        let crate_only = "on:\n  workflow_dispatch:\n...\n      - run: cargo publish\n        env:\n          CARGO_REGISTRY_TOKEN: x";
+        let from_source = "cargo build --release\ncp target/release/x ~/.local/bin";
+        let downloader = "curl -fsSL https://github.com/o/r/releases/latest/download/x.tar.gz";
+        assert_eq!(release_expectation(Some(gh_release), &[]), Expect::Release);
+        assert_eq!(release_expectation(Some(crate_only), &[]), Expect::Tag);
+        assert_eq!(release_expectation(None, &[from_source]), Expect::Nothing);
+        assert_eq!(release_expectation(None, &[downloader]), Expect::Release);
+        assert_eq!(
+            release_expectation(Some(crate_only), &[downloader]),
+            Expect::Release
+        );
     }
 
     #[test]
