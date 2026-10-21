@@ -97,6 +97,35 @@ pub fn release_expectation(release_yml: Option<&str>, installers: &[&str]) -> Ex
     }
 }
 
+/// The prefix of the tags that trigger the release workflow ("v" for
+/// `tags: ["v*"]`, "cli-v" for `- "cli-v*"`). A prefix other than "v" means
+/// binaries are released under their own tag namespace, apart from the
+/// crate's `vX.Y.Z` tags (diagprint does this).
+pub fn release_tag_prefix(release_yml: &str) -> Option<String> {
+    let mut lines = release_yml.lines();
+    while let Some(line) = lines.next() {
+        let t = line.trim_start();
+        let Some(rest) = t.strip_prefix("tags:") else {
+            continue;
+        };
+        let indent = line.len() - t.len();
+        let first = if let Some(inline) = rest.trim().strip_prefix('[') {
+            inline.split([',', ']']).next().map(str::to_string)
+        } else {
+            lines
+                .by_ref()
+                .take_while(|l| l.trim().is_empty() || l.len() - l.trim_start().len() > indent)
+                .map(str::trim)
+                .find(|l| l.starts_with("- "))
+                .map(|l| l[2..].to_string())
+        };
+        let pattern = first?;
+        let pattern = pattern.trim().trim_matches(|c| c == '"' || c == '\'');
+        return Some(pattern.split('*').next().unwrap_or(pattern).to_string());
+    }
+    None
+}
+
 /// The signer line `apksigner verify --print-certs` prints for signer #1.
 pub fn apksigner_cert(output: &str) -> Option<String> {
     output
@@ -164,6 +193,21 @@ mod tests {
         ]);
         assert_eq!(d.len(), 2);
         assert_eq!(d["aa"], ["install.sh", "README.md"]);
+    }
+
+    #[test]
+    fn release_tag_prefixes() {
+        assert_eq!(
+            release_tag_prefix("on:\n  push:\n    tags: [\"v*\"]\n").as_deref(),
+            Some("v")
+        );
+        assert_eq!(
+            release_tag_prefix("on:\n  push:\n    tags:\n      - 'v*.*.*'\njobs:\n").as_deref(),
+            Some("v")
+        );
+        let diagprint = "on:\n  push:\n    tags:\n      # A separate tag namespace\n      # from the crate's tags\n      - \"cli-v*\"\n\npermissions:\n";
+        assert_eq!(release_tag_prefix(diagprint).as_deref(), Some("cli-v"));
+        assert_eq!(release_tag_prefix("on:\n  workflow_dispatch:\n"), None);
     }
 
     #[test]
